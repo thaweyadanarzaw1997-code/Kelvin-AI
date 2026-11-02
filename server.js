@@ -7,6 +7,7 @@ const cloudinary = require('cloudinary').v2;
 const XLSX = require('xlsx');
 const fs = require('fs');
 const cors = require('cors');
+const { Groq } = require('groq-sdk'); // Groq SDK ကို ချိတ်ဆက်ခြင်း
 
 const app = express();
 app.use(cors());
@@ -18,6 +19,10 @@ const upload = multer({ dest: '/tmp/' });
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
 const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID;
+const GROQ_API_KEY = process.env.GROQ_API_KEY; // Groq Console မှ ရယူထားသော အခမဲ့ Key
+
+// Groq AI Initialization
+const groq = new Groq({ apiKey: GROQ_API_KEY });
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -41,7 +46,7 @@ try {
       },
       scopes: ['https://www.googleapis.com/auth/spreadsheets'],
     });
-    console.log("Google Auth initialized successfully for:", process.env.GOOGLE_CLIENT_EMAIL);
+    console.log("Google Auth initialized successfully.");
   }
 } catch (e) {
   console.error("Google Auth Initialization Error:", e.message);
@@ -51,10 +56,10 @@ const sheets = google.sheets({ version: 'v4', auth });
 const adminStates = {};
 
 app.get('/', (req, res) => {
-  res.send('Kelvin Online Shop Backend API is running!');
+  res.send('Fragrance by Kelvin Groq AI Backend is running!');
 });
 
-// 1. Get Items API
+// 1. Get Items API (Website အတွက်)
 app.get('/api/items', async (req, res) => {
   try {
     if (!auth) {
@@ -171,7 +176,7 @@ app.post('/api/order', async (req, res) => {
   }
 });
 
-// 3. Telegram Webhook
+// 3. Telegram Webhook (Groq AI Chatbot & Admin Panel)
 app.post('/api/telegram-webhook', upload.single('document'), async (req, res) => {
   try {
     const update = req.body;
@@ -207,31 +212,38 @@ app.post('/api/telegram-webhook', upload.single('document'), async (req, res) =>
       const msg = update.message;
       const chatId = msg.chat.id;
       const textMsg = (msg.text || '').trim();
+      const isAdmin = (chatId.toString() === ADMIN_CHAT_ID.toString());
 
-      if (textMsg === '/pending') {
-        await sendOrdersListByStatus(chatId, 'Pending', true);
-      }
-      else if (textMsg === '/inprogress') {
-        await sendOrdersListByStatus(chatId, 'In Progress', false);
-      }
-      else if (textMsg === '/finish') {
-        await sendReportExcel(chatId, 'Finish');
-      }
-      else if (textMsg.startsWith('/ORD-') || textMsg.startsWith('/ord-')) {
-        const lookupOrderId = textMsg.replace('/', '');
-        await sendVoucherCardByOrderId(chatId, lookupOrderId);
-      }
-      else if (adminStates[chatId] && adminStates[chatId].action === 'waiting_waybill') {
-        const waybillNo = textMsg;
-        const orderId = adminStates[chatId].orderId;
-        delete adminStates[chatId];
+      // Admin Commands
+      if (isAdmin) {
+        if (textMsg === '/pending') {
+          await sendOrdersListByStatus(chatId, 'Pending', true);
+          return res.sendStatus(200);
+        } else if (textMsg === '/inprogress') {
+          await sendOrdersListByStatus(chatId, 'In Progress', false);
+          return res.sendStatus(200);
+        } else if (textMsg === '/finish') {
+          await sendReportExcel(chatId, 'Finish');
+          return res.sendStatus(200);
+        } else if (textMsg.startsWith('/ORD-') || textMsg.startsWith('/ord-')) {
+          const lookupOrderId = textMsg.replace('/', '');
+          await sendVoucherCardByOrderId(chatId, lookupOrderId);
+          return res.sendStatus(200);
+        } else if (adminStates[chatId] && adminStates[chatId].action === 'waiting_waybill') {
+          const waybillNo = textMsg;
+          const orderId = adminStates[chatId].orderId;
+          delete adminStates[chatId];
 
-        await updateOrderWaybillAndStatus(orderId, waybillNo, 'In Progress');
-        await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-          chat_id: chatId, text: `✅ Order ID (${orderId}) တွင် WayBill (${waybillNo}) ထည့်သွင်းပြီး Status ကို 'In Progress' သို့ ပြောင်းလိုက်ပါပြီ။`
-        });
+          await updateOrderWaybillAndStatus(orderId, waybillNo, 'In Progress');
+          await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+            chat_id: chatId, text: `✅ Order ID (${orderId}) တွင် WayBill (${waybillNo}) ထည့်သွင်းပြီး Status ကို 'In Progress' သို့ ပြောင်းလိုက်ပါပြီ။`
+          });
+          return res.sendStatus(200);
+        }
       }
-      else if (msg.document) {
+
+      // Excel File Upload by Admin
+      if (isAdmin && msg.document) {
         const fileId = msg.document.file_id;
         const fileRes = await axios.get(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`);
         const filePath = fileRes.data.result.file_path;
@@ -247,6 +259,57 @@ app.post('/api/telegram-webhook', upload.single('document'), async (req, res) =>
 
         await processExcelUpload(excelRows, chatId);
         fs.unlinkSync(tmpFilePath);
+        return res.sendStatus(200);
+      }
+
+      // ==========================================
+      // CUSTOMER AI CHATBOT (GROQ API INTEGRATION)
+      // ==========================================
+      if (!isAdmin) {
+        // 1. Fetch Products from Sheet1 to give context to AI
+        const sheetRes = await sheets.spreadsheets.values.get({
+          spreadsheetId: GOOGLE_SHEET_ID,
+          range: 'Sheet1!A:L',
+        });
+        const rows = sheetRes.data.values || [];
+        let productListText = "";
+        for (let i = 1; i < rows.length; i++) {
+          let r = rows[i];
+          if (r[1]) {
+            productListText += `- ပစ္စည်းအမည်: ${r[1]} | အမျိုးအစား: ${r[8]} (${r[9]}) | ဈေးနှုန်း (3ml: ${r[3]}Ks, 5ml: ${r[4]}Ks, 10ml: ${r[5]}Ks, 30ml: ${r[6]}Ks, 100ml: ${r[7]}Ks) | အကြောင်းအရာ: ${r[10]}\n`;
+          }
+        }
+
+        // 2. Setup System Prompt for Groq AI
+        const systemPrompt = `
+သင်သည် 'Fragrance by Kelvin' ရေမွှေးဆိုင်၏ အလွန်လိမ္မာပြီး ဖော်ဖော်ရွေရွေရှိသော AI အရောင်းလက်ထောက် (AI Sales Assistant) ဖြစ်ပါသည်။
+Customer များက ရေမွှေးအကြောင်း မေးမြန်းလျှင် အောက်ပါ Google Sheet ထဲတွင် ရှိသော ပစ္စည်းစာရင်းနှင့် ဈေးနှုန်းများကို အခြေခံ၍ လူလိုမျိုး ယဉ်ကျေးပျူငှာစွာ၊ ဖော်ဖော်ရွေရွေ မြန်မာဘာသာဖြင့် ရှင်းပြပေးရပါမည်။ 
+အကယ်၍ Customer က ဈေးမဝယ်ဘဲ အခြားအထွေအထွေ စကားပြောဆိုလျှင်လည်း ချိုချိုသာသာနှင့် ကောင်းမွန်သော Reply ပြန်ပေးပါ။
+ပစ္စည်းအချက်အလက်များကို သင်၏ အသိပညာဖြင့်ပါ ပေါင်းစပ်၍ ရေမွှေးနံ့သင်းပုံ (Scent Notes) များကို အသေးစိတ် ရှင်းပြနိုင်ပါသည်။
+
+--- Google Sheet ပစ္စည်းစာရင်းများ ---
+${productListText || 'ယခုလက်ရှိ ပစ္စည်းစာရင်း မရှိသေးပါ။'}
+-------------------------------------
+`;
+
+        // 3. Request to Groq API (Llama 3 Model)
+        const chatCompletion = await groq.chat.completions.create({
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: textMsg }
+          ],
+          model: "llama-3.3-70b-versatile",
+          temperature: 0.7,
+        });
+
+        const aiReply = chatCompletion.choices[0]?.message?.content || "ကျေးဇူးပြု၍ မေးခွန်းကို ထပ်မံမေးမြန်းပေးပါ။";
+
+        // 4. Send AI response back to customer on Telegram
+        await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+          chat_id: chatId,
+          text: aiReply,
+          parse_mode: 'Markdown'
+        });
       }
     }
     res.sendStatus(200);
@@ -256,6 +319,7 @@ app.post('/api/telegram-webhook', upload.single('document'), async (req, res) =>
   }
 });
 
+// Helper Functions for Admin Panel
 async function updateOrderStatus(orderId, status) {
   const res = await sheets.spreadsheets.values.get({ spreadsheetId: GOOGLE_SHEET_ID, range: 'Sheet2!A:M' });
   const rows = res.data.values;
@@ -302,7 +366,7 @@ async function sendVoucherCardByOrderId(chatId, orderId) {
 
     if (!foundRow) {
       await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-        chat_id: chatId, text: `❌ Order ID (${orderId}) ကို ရှာမတွေ့ပါ။ နံပါတ်မှန်ကန်မှု ရှိမရှိ စစ်ဆေးပါ။`
+        chat_id: chatId, text: `❌ Order ID (${orderId}) ကို ရှာမတွေ့ပါ။`
       });
       return;
     }
@@ -330,18 +394,12 @@ async function sendVoucherCardByOrderId(chatId, orderId) {
                         `💰 Payment: ${payment}\n` +
                         `💵 Total: ${total}\n` +
                         `📦 Status: ${status}\n` +
-                        `🚚 Waybill: ${waybill}\n` +
-                        `━━━━━━━━━━━━━━━━━━━\n` +
-                        `_Thank you for shopping with us!_`;
+                        `🚚 Waybill: ${waybill}`;
 
     let keyboardRows = [];
     if (status === 'Pending') {
       keyboardRows.push([
         { text: "➕ Add WayBill", callback_data: `add_wb_${orderId}` },
-        { text: "❌ Cancel", callback_data: `cancel_${orderId}` }
-      ]);
-    } else if (status === 'In Progress') {
-      keyboardRows.push([
         { text: "❌ Cancel", callback_data: `cancel_${orderId}` }
       ]);
     }
@@ -359,16 +417,12 @@ async function sendVoucherCardByOrderId(chatId, orderId) {
     }
   } catch (err) {
     console.error("Voucher Error:", err);
-    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      chat_id: chatId, text: `⚠️ Error: ${err.message}`
-    });
   }
 }
 
 async function sendOrdersListByStatus(chatId, statusFilter, showAddWbButton) {
   const res = await sheets.spreadsheets.values.get({ spreadsheetId: GOOGLE_SHEET_ID, range: 'Sheet2!A:M' });
   const rows = res.data.values || [];
-  
   let filtered = rows.filter(r => (r[7] === statusFilter || r[12] === statusFilter));
 
   if (filtered.length === 0) {
@@ -387,24 +441,18 @@ async function sendOrdersListByStatus(chatId, statusFilter, showAddWbButton) {
     const total = r[6] || 0;
     const payment = r[9] || 'N/A';
 
-    const text = `✨ *FRAGRANCE BY KELVIN* ✨\n\n` +
-                 `📦 *${statusFilter} Order*\n\n` +
+    const text = `📦 *${statusFilter} Order*\n\n` +
                  `🆔 Order ID: \`${orderId}\`\n` +
                  `👤 Name: ${customer}\n` +
                  `📞 Phone: ${phone}\n` +
                  `📍 Address: ${address}\n` +
                  `🛍 Items: ${items}\n` +
-                 `💰 Payment: ${payment}\n` +
                  `💵 Total: ${Number(total).toLocaleString()} Ks`;
 
     let keyboardRows = [];
     if (showAddWbButton) {
       keyboardRows.push([
         { text: "➕ Add WayBill", callback_data: `add_wb_${orderId}` },
-        { text: "❌ Cancel", callback_data: `cancel_${orderId}` }
-      ]);
-    } else {
-      keyboardRows.push([
         { text: "❌ Cancel", callback_data: `cancel_${orderId}` }
       ]);
     }
@@ -461,13 +509,6 @@ async function processExcelUpload(excelRows, chatId) {
       let matchFound = false;
       if (s2Waybill && s2Waybill.toLowerCase() === waybill.toLowerCase()) {
         matchFound = true;
-      } else {
-        for (let cell of row) {
-          if (cell && s2OrderId && cell.toString().trim().toLowerCase() === s2OrderId.toLowerCase()) {
-            matchFound = true;
-            break;
-          }
-        }
       }
 
       if (matchFound) {
@@ -521,4 +562,4 @@ async function sendReportExcel(chatId, statusFilter) {
 }
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Groq AI Server running on port ${PORT}`));
