@@ -212,7 +212,7 @@ app.post('/api/telegram-webhook', upload.single('document'), async (req, res) =>
       const msg = update.message;
       const chatId = msg.chat.id;
       const textMsg = (msg.text || '').trim();
-      const isAdmin = (chatId.toString() === ADMIN_CHAT_ID.toString());
+      const isAdmin = ADMIN_CHAT_ID && (chatId.toString() === ADMIN_CHAT_ID.toString());
 
       // Admin Commands
       if (isAdmin) {
@@ -561,5 +561,10 @@ async function sendReportExcel(chatId, statusFilter) {
   fs.unlinkSync(filePath);
 }
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Groq AI Server running on port ${PORT}`));
+// Local development (Localhost) တွင် Run ရန် နှင့် Vercel တွင် Serverless အဖြစ် Export လုပ်ရန်
+if (process.env.NODE_ENV !== 'production') {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => console.log(`Groq AI Server running on port ${PORT}`));
+}
+
+module.exports = app;
