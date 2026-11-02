@@ -1,19 +1,23 @@
 {
-  "name": "fragrance-shop-backend",
+  "name": "kelvin-online-shop-bot",
   "version": "1.0.0",
-  "description": "Telegram Bot & Google Sheets E-Commerce Backend on Vercel with Odoo Embed Support",
+  "description": "Telegram Online Shop Bot with Groq AI and Google Sheets integration",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "axios": "^1.6.8",
-    "body-parser": "^1.20.2",
-    "cloudinary": "^2.1.0",
+    "axios": "^1.6.0",
+    "body-parser": "^1.20.1",
+    "cloudinary": "^1.41.3",
     "cors": "^2.8.5",
-    "express": "^4.19.2",
-    "googleapis": "^134.0.0",
+    "form-data": "^4.0.0",
+    "googleapis": "^126.0.0",
+    "groq-sdk": "^0.9.1",
     "multer": "^1.4.5-lts.1",
     "xlsx": "^0.18.5"
+  },
+  "engines": {
+    "node": ">=18.x"
   }
 }
