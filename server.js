@@ -1,3 +1,7 @@
+app.use((req, res, next) => {
+  console.log("=== WEBHOOK INCOMING REQUEST ===", req.method, req.url);
+  next();
+});
 const express = require('express');
 const bodyParser = require('body-parser');
 const axios = require('axios');
